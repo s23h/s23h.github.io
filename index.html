@@ -90,6 +90,7 @@
     <div id="progress">
       <div id="label"></div>
     </div>
+    <script src="js/howler.min.js"></script>
     <script src="js/lottie.js"></script>
     <div id="lottie-mp4"></div>
     <canvas
@@ -168,122 +169,119 @@
 
             var images = [];
 
-            async function renderFrames() {
-              let img = new Image(),
-                serialized = new XMLSerializer().serializeToString(ctx),
-                svg = new Blob([serialized], { type: "image/svg+xml" }),
-                url = URL.createObjectURL(svg),
-                frameCount = 250,
-                ffmpegArguments = [];
-
-              // GENERATE PNGs
-              img.src = url;
-              img.onload = async function () {
-                imgCTX.drawImage(img, 0, 0);
-
-                let p = Math.round(10 + (c / frameCount) * 45),
-                  blob = await new Promise((resolve) =>
-                    canvas.toBlob((blob) => resolve(blob))
-                  );
-
-                images.push(blob.arrayBuffer());
-
-                label.innerHTML = `Render progress: ${p} %`;
-                labelBlack.innerHTML = label.innerHTML;
-                progress.style.width = (1080 * p) / 100;
-
-                if (++c == frameCount) {
-                  Promise.all(images).then((blobs) => {
-                    const worker = new Worker("js/ffmpeg-worker-mp4.js");
-                    worker.onmessage = function (e) {
-                      const msg = e.data;
-
-                      switch (msg.type) {
-                        case "ready":
-                          ffmpegArguments.push(
-                            "-framerate",
-                            "25",
-                            "-i",
-                            "%d.png",
-                            "-preset",
-                            "ultrafast",
-                            "-crf",
-                            "17",
-                            "-pix_fmt",
-                            "yuv420p",
-                            "out.mp4"
-                          );
-
-                          worker.postMessage({
-                            type: "run",
-                            MEMFS: blobs.map((data, i) => ({
-                              name: `${i + 1}.png`,
-                              data,
-                            })),
-                            arguments: ffmpegArguments,
-                          });
-
-                          break;
-                        case "stdout":
-                          console.log(msg.data);
-                          break;
-                        case "stderr":
-                          console.log(msg.data);
-
-                          let logLine = msg.data.split(" ");
-
-                          if (logLine[0] == "frame=") {
-                            let p = Math.round(
-                              55 +
-                                (Number(/\d+/g.exec(msg.data)[0]) /
-                                  frameCount) *
-                                  45
-                            );
-
-                            label.innerHTML = `Render progress: ${p} %`;
-                            labelBlack.innerHTML = label.innerHTML;
-                            progress.style.width = (1080 * p) / 100;
-                          }
-
-                          break;
-                        case "exit":
-                          console.log("Process exited with code " + msg.data);
-                          break;
-                        case "done":
-                          console.log(
-                            "Rendering time: " +
-                              (Date.now() - timeStamp) / 1000 +
-                              "s"
-                          );
-
-                          download(
-                            URL.createObjectURL(
-                              new Blob([msg.data.MEMFS[0].data], {
-                                type: "video/mp4",
-                              })
-                            ),
-                            "zeed.mp4"
-                          );
-
-                          window.URL.revokeObjectURL(url);
-
-                          worker.terminate();
-                      }
+            function fetchData(url) {
+                return new Promise(function(resolve, reject) {
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("GET", url, true);
+                    xhr.responseType = "arraybuffer";
+                    xhr.onload = function() {
+                        if (this.status >= 200 && this.status < 400) {
+                            resolve(new Uint8Array(this.response));
+                        } else {
+                            reject(new Error(this.responseText));
+                        }
                     };
-                  });
-                } else {
-                  anim.goToAndStop(c, true);
-
-                  serialized = new XMLSerializer().serializeToString(ctx);
-                  svg = new Blob([serialized], { type: "image/svg+xml" });
-                  url = URL.createObjectURL(svg);
-
-                  img.src = url;
-                }
-              };
+                    xhr.onerror = reject;
+                    xhr.send();
+                });
             }
 
-            renderFrames();
+            async function renderFrames() {
+                let img = new Image(),
+                    serialized = new XMLSerializer().serializeToString(ctx),
+                    svg = new Blob([serialized], { type: "image/svg+xml" }),
+                    url = URL.createObjectURL(svg),
+                    frameCount = lottie.getRegisteredAnimations()[0].totalFrames,
+                    ffmpegArguments = []
+
+                const hasAudio = lottie.getRegisteredAnimations()[0].audioController.audios.length
+
+                // FIRST ADD AUDIO
+                if (hasAudio) {
+                    images.push(fetchData(lottie.getRegisteredAnimations()[0].audioController.audios[0].assetData.u))
+                    ffmpegArguments.push("-i", "audio.mp3")
+                }
+                
+                // GENERATE PNGs
+                img.src = url
+                img.onload = async function() {
+                    imgCTX.drawImage(img, 0, 0)
+
+                    let p = Math.round(10 + c / frameCount * 45),
+                        blob = await new Promise(resolve => canvas.toBlob(blob => resolve(blob)))
+                    
+                    images.push(await blob.arrayBuffer())
+
+                    label.innerHTML = `Render progress: ${p} %`
+                    labelBlack.innerHTML = label.innerHTML
+                    progress.style.width = 1080 * p / 100
+
+                    if (++c == frameCount) {
+                        Promise.all(images).then(blobs => {
+                            const worker = new Worker("js/ffmpeg-worker-mp4.js")
+                            worker.onmessage = function(e) {
+                                const msg = e.data
+
+                                switch (msg.type) {
+                                    case "ready":
+                                        ffmpegArguments.push("-framerate", "25",
+                                                             "-i", "%d.png",
+                                                             "-preset", "ultrafast",
+                                                             "-crf", "17",
+                                                             "-pix_fmt", "yuv420p",
+                                                             "out.mp4")
+
+                                        worker.postMessage({
+                                            type: "run",
+                                            MEMFS: blobs.map((data, i) => ({ name: (i == 0 && hasAudio ? "audio.mp3" : `${i - hasAudio}.png`), data })),
+                                            arguments: ffmpegArguments
+                                        })
+
+                                        break
+                                    case "stdout":
+                                        console.log(msg.data)
+                                        break
+                                    case "stderr":
+                                        console.log(msg.data)
+
+                                        let logLine = msg.data.split(" ")
+
+                                        if (logLine[0] == "frame=") {
+                                            let p = Math.round(55 + Number(/\d+/g.exec(msg.data)[0]) / frameCount * 45)
+
+                                            label.innerHTML = `Render progress: ${p} %`
+                                            labelBlack.innerHTML = label.innerHTML
+                                            progress.style.width = 1080 * p / 100
+                                        }
+
+                                        break
+                                    case "exit":
+                                        console.log("Process exited with code " + msg.data)
+                                        break
+                                    case "done":
+                                        console.log("Rendering time: " + ((Date.now() - timeStamp) / 1000) + "s")
+
+                                        download(URL.createObjectURL(new Blob([msg.data.MEMFS[0].data], { type: "video/mp4" })), "zeed.mp4")
+
+                                        window.URL.revokeObjectURL(url)
+
+                                        worker.terminate()
+                                }
+                            }
+                        })
+                    } else {
+                        anim.goToAndStop(c, true)
+
+                        serialized = new XMLSerializer().serializeToString(ctx)
+                        svg = new Blob([serialized], { type: "image/svg+xml" })
+                        url = URL.createObjectURL(svg)
+
+                        img.src = url
+                    }
+                }
+            }
+
+            renderFrames()
           });
         } catch (e) {
           alert("Invalid JSON");
